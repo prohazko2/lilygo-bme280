@@ -46,7 +46,7 @@ TinyGsmClient gsmClient(modem);
 PubSubClient mqtt(gsmClient);
 
 unsigned long lastPublishMs = 0;
-const unsigned long publishIntervalMs = 15000; // 15 seconds
+const unsigned long publishIntervalMs = 300000; // 5 minutes
 
 
 static void logNetworkInfo(const char *prefix)
@@ -58,6 +58,28 @@ static void logNetworkInfo(const char *prefix)
     Serial.print(" RSSI="); Serial.print(rssi);
     Serial.print(" dBm, OP="); Serial.print(oper);
     //Serial.print(", IP="); Serial.println(ip);
+}
+
+static void publishBme()
+{
+    float temperatureC = bme.readTemperature();
+    //float humidity = bme.readHumidity();
+    //float pressurePa = bme.readPressure();
+
+    char payload[160];
+    snprintf(payload, sizeof(payload),
+             "{\"c\":%.2f}",
+             temperatureC);
+
+    Serial.print("[MQTT] Publish ");
+    Serial.print(MQTT_TOPIC);
+    Serial.print(" -> ");
+    Serial.println(payload);
+
+    if (mqtt.connected())
+    {
+        mqtt.publish(MQTT_TOPIC, payload, true);
+    }
 }
 
 static void powerOnModem()
@@ -143,6 +165,9 @@ static bool mqttReconnect()
     if (ok)
     {
         Serial.println("OK");
+        // Immediate publish on first successful connect
+        publishBme();
+        lastPublishMs = millis();
     }
     else
     {
@@ -226,24 +251,6 @@ void loop()
     if (now - lastPublishMs >= publishIntervalMs)
     {
         lastPublishMs = now;
-
-        float temperatureC = bme.readTemperature();
-        //float humidity = bme.readHumidity();
-        //float pressurePa = bme.readPressure();
-
-        char payload[160];
-        snprintf(payload, sizeof(payload),
-                 "{\"c\":%.2f}",
-                 temperatureC);
-
-        Serial.print("[MQTT] Publish ");
-        Serial.print(MQTT_TOPIC);
-        Serial.print(" -> ");
-        Serial.println(payload);
-
-        if (mqtt.connected())
-        {
-            mqtt.publish(MQTT_TOPIC, payload, true);
-        }
+        publishBme();
     }
 }
