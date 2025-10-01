@@ -30,7 +30,6 @@ static const char *GPRS_PASS = "";               // often empty
 // MQTT broker
 static const char *MQTT_HOST = "sandbox.rightech.io";   // change to your broker host/IP
 static const uint16_t MQTT_PORT = 1883;           // change if needed (e.g. 8883 TLS not covered here)
-static const char *MQTT_CLIENT_ID = "mqtt-olegprohazko-ecqy8r";
 static const char *MQTT_USER = "";               // optional
 static const char *MQTT_PASS = "";               // optional
 static const char *MQTT_TOPIC = "dht11/raw";
@@ -60,6 +59,17 @@ static void logNetworkInfo(const char *prefix)
     Serial.print(" RSSI="); Serial.print(rssi);
     Serial.print(" dBm, OP="); Serial.print(oper);
     //Serial.print(", IP="); Serial.println(ip);
+}
+
+static const char *getMqttClientId()
+{
+#ifdef MQTT_CLIENT_ID
+    if (strlen(MQTT_CLIENT_ID) > 0)
+    {
+        return MQTT_CLIENT_ID;
+    }
+#endif
+    return "xxx"; // safe default if env var not provided
 }
 
 static bool publishBme()
@@ -168,16 +178,16 @@ static bool mqttReconnect()
     Serial.print(":");
     Serial.print(MQTT_PORT);
     Serial.print(" as ");
-    Serial.print(MQTT_CLIENT_ID);
+    Serial.print(getMqttClientId());
     Serial.print(" ... ");
     bool ok;
     if (strlen(MQTT_USER) == 0)
     {
-        ok = mqtt.connect(MQTT_CLIENT_ID);
+        ok = mqtt.connect(getMqttClientId());
     }
     else
     {
-        ok = mqtt.connect(MQTT_CLIENT_ID, MQTT_USER, MQTT_PASS);
+        ok = mqtt.connect(getMqttClientId(), MQTT_USER, MQTT_PASS);
     }
     if (ok)
     {
