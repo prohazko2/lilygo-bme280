@@ -7,6 +7,7 @@
 // Cellular + MQTT
 #include <TinyGsmClient.h>
 #include <PubSubClient.h>
+#include <esp_task_wdt.h>
 
 // ====== TTGO T-Call (SIM800L) Pins ======
 // Reference values commonly used by TTGO T-Call boards
@@ -244,6 +245,12 @@ void setup()
     // Setup MQTT
     mqtt.setServer(MQTT_HOST, MQTT_PORT);
     lastSuccessfulMs = millis();
+
+    // Hardware watchdog (hang protection): 60s timeout for loop task
+    // Will reset ESP32 if loop stops feeding for >60s (e.g., deadlock)
+    const int wdtTimeoutSec = 60;
+    esp_task_wdt_init(wdtTimeoutSec, true);
+    esp_task_wdt_add(NULL); // add current (loop) task
 }
 
 void loop()
@@ -264,6 +271,9 @@ void loop()
     }
     mqtt.loop();
 
+    // Feed hardware watchdog each loop iteration
+    esp_task_wdt_reset();
+
     unsigned long now = millis();
     if (now - lastPublishMs >= publishIntervalMs)
     {
@@ -271,7 +281,7 @@ void loop()
         publishBme();
     }
 
-    // Watchdog: reboot if there was no successful publish for 10 minutes
+    // Connectivity watchdog: reboot if there was no successful publish for 10 minutes
     if (millis() - lastSuccessfulMs > 600000UL)
     {
         Serial.println("[WDT] No successful publish for 10 minutes. Restarting...");
