@@ -47,6 +47,7 @@ PubSubClient mqtt(gsmClient);
 
 unsigned long lastPublishMs = 0;
 const unsigned long publishIntervalMs = 300000; // 5 minutes
+unsigned long lastSuccessfulMs = 0; // watchdog anchor
 
 
 static void logNetworkInfo(const char *prefix)
@@ -60,7 +61,7 @@ static void logNetworkInfo(const char *prefix)
     //Serial.print(", IP="); Serial.println(ip);
 }
 
-static void publishBme()
+static bool publishBme()
 {
     float temperatureC = bme.readTemperature();
     //float humidity = bme.readHumidity();
@@ -76,10 +77,25 @@ static void publishBme()
     Serial.print(" -> ");
     Serial.println(payload);
 
+    bool sent = false;
     if (mqtt.connected())
     {
-        mqtt.publish(MQTT_TOPIC, payload, true);
+        sent = mqtt.publish(MQTT_TOPIC, payload, true);
+        if (sent)
+        {
+            lastSuccessfulMs = millis();
+            Serial.println("[MQTT] Publish OK");
+        }
+        else
+        {
+            Serial.println("[MQTT] Publish FAILED");
+        }
     }
+    else
+    {
+        Serial.println("[MQTT] Not connected, skip publish");
+    }
+    return sent;
 }
 
 static void powerOnModem()
@@ -227,6 +243,7 @@ void setup()
 
     // Setup MQTT
     mqtt.setServer(MQTT_HOST, MQTT_PORT);
+    lastSuccessfulMs = millis();
 }
 
 void loop()
@@ -252,5 +269,13 @@ void loop()
     {
         lastPublishMs = now;
         publishBme();
+    }
+
+    // Watchdog: reboot if there was no successful publish for 10 minutes
+    if (millis() - lastSuccessfulMs > 600000UL)
+    {
+        Serial.println("[WDT] No successful publish for 10 minutes. Restarting...");
+        ESP.restart();
+        delay(1000);
     }
 }
