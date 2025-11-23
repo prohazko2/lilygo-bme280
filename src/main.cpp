@@ -43,15 +43,15 @@ static const char *getWifiPassword()
 }
 
 // GSM/GPRS configuration
-static const char *GPRS_APN = "internet";        // change to your operator's APN
-static const char *GPRS_USER = "";               // often empty
-static const char *GPRS_PASS = "";               // often empty
+static const char *GPRS_APN = "internet";
+static const char *GPRS_USER = "";
+static const char *GPRS_PASS = "";
 
 // MQTT broker
-static const char *MQTT_HOST = "sandbox.rightech.io"; // change to your broker host/IP
-static const uint16_t MQTT_PORT = 1883;               // change if needed (e.g. 8883 TLS not covered here)
-static const char *MQTT_USER = "";                    // optional
-static const char *MQTT_PASS = "";                    // optional
+static const char *MQTT_HOST = "sandbox.rightech.io";
+static const uint16_t MQTT_PORT = 1883;
+static const char *MQTT_USER = "";
+static const char *MQTT_PASS = "";
 static const char *MQTT_TOPIC = "home/bme280";
 
 // ====== Globals ======
@@ -67,7 +67,12 @@ TinyGsmClient gsmClient(modem);
 PubSubClient *mqtt = nullptr;
 
 // Connection state
-enum ConnectionType { NONE, WIFI, GSM };
+enum ConnectionType
+{
+    NONE,
+    WIFI,
+    GSM
+};
 ConnectionType activeConnection = NONE;
 
 unsigned long lastPublishMs = 0;
