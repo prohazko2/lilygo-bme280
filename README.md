@@ -26,7 +26,7 @@ MQTT брокер и топик настраиваются в `src/main.cpp`:
 
 ```bash
 export WIFI_SSID="wifi-ssid"
-export WIFI_PASSWORD="wifi-pass"
+export WIFI_PASS="wifi-pass"
 export MQTT_CLIENT_ID="client-id"
 ```
 

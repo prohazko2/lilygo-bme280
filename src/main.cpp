@@ -36,8 +36,8 @@ static const char *getWifiSsid()
 
 static const char *getWifiPassword()
 {
-#ifdef WIFI_PASSWORD
-    return WIFI_PASSWORD;
+#ifdef WIFI_PASS
+    return WIFI_PASS;
 #endif
     return ""; // empty password if not set
 }
