@@ -4,14 +4,22 @@
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BME280.h>
 
-// WiFi + MQTT
+// WiFi + GSM + MQTT
 #include <WiFi.h>
+#include <TinyGsmClient.h>
 #include <PubSubClient.h>
 #include <esp_task_wdt.h>
 
 // I2C pins for BME280 (ESP32 default)
 #define I2C_SDA 21
 #define I2C_SCL 22
+
+// TTGO T-Call (SIM800L) Pins
+#define MODEM_TX 27
+#define MODEM_RX 26
+#define MODEM_PWRKEY 4
+#define MODEM_RST 5
+#define MODEM_POWER_ON 23
 
 // ====== Network / MQTT configuration ======
 // WiFi credentials (from build-time env vars or defaults)
@@ -34,6 +42,11 @@ static const char *getWifiPassword()
     return ""; // empty password if not set
 }
 
+// GSM/GPRS configuration
+static const char *GPRS_APN = "internet";        // change to your operator's APN
+static const char *GPRS_USER = "";               // often empty
+static const char *GPRS_PASS = "";               // often empty
+
 // MQTT broker
 static const char *MQTT_HOST = "sandbox.rightech.io"; // change to your broker host/IP
 static const uint16_t MQTT_PORT = 1883;               // change if needed (e.g. 8883 TLS not covered here)
@@ -44,8 +57,18 @@ static const char *MQTT_TOPIC = "home/bme280";
 // ====== Globals ======
 Adafruit_BME280 bme;
 
+// Network clients
 WiFiClient wifiClient;
-PubSubClient mqtt(wifiClient);
+HardwareSerial SerialAT(1);
+TinyGsm modem(SerialAT);
+TinyGsmClient gsmClient(modem);
+
+// MQTT client (will use either WiFi or GSM)
+PubSubClient *mqtt = nullptr;
+
+// Connection state
+enum ConnectionType { NONE, WIFI, GSM };
+ConnectionType activeConnection = NONE;
 
 unsigned long lastPublishMs = 0;
 const unsigned long publishIntervalMs = 300000; // 5 minutes
@@ -53,12 +76,26 @@ unsigned long lastSuccessfulMs = 0;             // watchdog anchor
 
 static void logNetworkInfo()
 {
-    Serial.print("[WiFi] SSID=");
-    Serial.print(WiFi.SSID());
-    Serial.print(", RSSI=");
-    Serial.print(WiFi.RSSI());
-    Serial.print(" dBm, IP=");
-    Serial.println(WiFi.localIP());
+    if (activeConnection == WIFI)
+    {
+        Serial.print("[WiFi] SSID=");
+        Serial.print(WiFi.SSID());
+        Serial.print(", RSSI=");
+        Serial.print(WiFi.RSSI());
+        Serial.print(" dBm, IP=");
+        Serial.println(WiFi.localIP());
+    }
+    else if (activeConnection == GSM)
+    {
+        int16_t rssi = modem.getSignalQuality();
+        String oper = modem.getOperator();
+        Serial.print("[GSM] RSSI=");
+        Serial.print(rssi);
+        Serial.print(" dBm, Operator=");
+        Serial.print(oper);
+        Serial.print(", IP=");
+        Serial.println(modem.localIP());
+    }
 }
 
 static const char *getMqttClientId()
@@ -89,9 +126,9 @@ static bool publishBme()
     Serial.println(payload);
 
     bool sent = false;
-    if (mqtt.connected())
+    if (mqtt && mqtt->connected())
     {
-        sent = mqtt.publish(MQTT_TOPIC, payload, true);
+        sent = mqtt->publish(MQTT_TOPIC, payload, true);
         if (sent)
         {
             lastSuccessfulMs = millis();
@@ -120,6 +157,68 @@ static void mqttCallback(char *topic, byte *payload, unsigned int length)
         Serial.println("[MQTT] Read command received, publishing current readings");
         publishBme();
     }
+}
+
+static void powerOnModem()
+{
+    pinMode(MODEM_POWER_ON, OUTPUT);
+    pinMode(MODEM_PWRKEY, OUTPUT);
+    pinMode(MODEM_RST, OUTPUT);
+
+    // Turn on the modem power supply
+    digitalWrite(MODEM_POWER_ON, HIGH);
+    delay(100);
+
+    // Ensure reset is high (inactive)
+    digitalWrite(MODEM_RST, HIGH);
+    delay(100);
+
+    // Pulse PWRKEY to power the modem
+    digitalWrite(MODEM_PWRKEY, HIGH);
+    delay(100);
+    digitalWrite(MODEM_PWRKEY, LOW);
+    delay(1000);
+    digitalWrite(MODEM_PWRKEY, HIGH);
+
+    // Give the modem time to boot
+    delay(3000);
+}
+
+static bool ensureGprs()
+{
+    if (modem.isGprsConnected())
+    {
+        return true;
+    }
+
+    Serial.println("[GSM] Waiting for network (60s)...");
+    if (!modem.waitForNetwork(60000L))
+    {
+        Serial.println("[GSM] Network failed");
+        return false;
+    }
+    if (!modem.isNetworkConnected())
+    {
+        Serial.println("[GSM] Not connected to network");
+        return false;
+    }
+
+    Serial.print("[GPRS] Attaching with APN='");
+    Serial.print(GPRS_APN);
+    Serial.println("' ...");
+    if (!modem.gprsConnect(GPRS_APN, GPRS_USER, GPRS_PASS))
+    {
+        Serial.println("[GPRS] GPRS attach failed");
+        return false;
+    }
+    if (!modem.isGprsConnected())
+    {
+        Serial.println("[GPRS] Not connected after attach");
+        return false;
+    }
+    Serial.println("[GPRS] Connected");
+    logNetworkInfo();
+    return true;
 }
 
 static bool ensureWifi()
@@ -169,7 +268,12 @@ static bool ensureWifi()
 
 static bool mqttReconnect()
 {
-    if (mqtt.connected())
+    if (!mqtt)
+    {
+        return false;
+    }
+
+    if (mqtt->connected())
     {
         return true;
     }
@@ -183,23 +287,23 @@ static bool mqttReconnect()
     bool ok;
     if (strlen(MQTT_USER) == 0)
     {
-        ok = mqtt.connect(getMqttClientId());
+        ok = mqtt->connect(getMqttClientId());
     }
     else
     {
-        ok = mqtt.connect(getMqttClientId(), MQTT_USER, MQTT_PASS);
+        ok = mqtt->connect(getMqttClientId(), MQTT_USER, MQTT_PASS);
     }
     if (ok)
     {
         Serial.println("OK");
-        mqtt.subscribe("home/bme280/read");
+        mqtt->subscribe("home/bme280/read");
         // Immediate publish on first successful connect
         publishBme();
         lastPublishMs = millis();
     }
     else
     {
-        int st = mqtt.state();
+        int st = mqtt->state();
         Serial.print("FAILED, state=");
         Serial.println(st);
         Serial.println("[MQTT] States: -4:CONN_TIMEOUT, -3:CONN_LOST, -2:CONNECT_FAILED, -1:DISCONNECTED, 1:BAD_PROTO, 2:BAD_CLIENT_ID, 3:UNAVAILABLE, 4:BAD_CREDENTIALS, 5:UNAUTHORIZED");
@@ -230,20 +334,58 @@ void setup()
         }
     }
 
-    // Connect to WiFi
+    // Try WiFi first
+    bool wifiOk = false;
     for (int i = 0; i < 3; ++i)
     {
         Serial.print("[WiFi] Try ");
         Serial.print(i + 1);
         Serial.println("/3");
         if (ensureWifi())
+        {
+            wifiOk = true;
+            activeConnection = WIFI;
+            mqtt = new PubSubClient(wifiClient);
             break;
+        }
         delay(5000);
     }
 
+    // If WiFi failed, try GSM
+    if (!wifiOk)
+    {
+        Serial.println("[NET] WiFi failed, trying GSM...");
+        powerOnModem();
+        Serial.println("[MODEM] Initializing SerialAT...");
+        SerialAT.begin(115200, SERIAL_8N1, MODEM_RX, MODEM_TX);
+        delay(1000);
+        modem.restart();
+        delay(2000);
+        String modemInfo = modem.getModemInfo();
+        Serial.print("[MODEM] ");
+        Serial.println(modemInfo);
+
+        for (int i = 0; i < 3; ++i)
+        {
+            Serial.print("[GSM] Try ");
+            Serial.print(i + 1);
+            Serial.println("/3");
+            if (ensureGprs())
+            {
+                activeConnection = GSM;
+                mqtt = new PubSubClient(gsmClient);
+                break;
+            }
+            delay(5000);
+        }
+    }
+
     // Setup MQTT
-    mqtt.setServer(MQTT_HOST, MQTT_PORT);
-    mqtt.setCallback(mqttCallback);
+    if (mqtt)
+    {
+        mqtt->setServer(MQTT_HOST, MQTT_PORT);
+        mqtt->setCallback(mqttCallback);
+    }
     lastSuccessfulMs = millis();
 
     // Hardware watchdog (hang protection): 60s timeout for loop task
@@ -258,22 +400,81 @@ void setup()
 
 void loop()
 {
-    // Maintain WiFi and MQTT connection
-    if (WiFi.status() != WL_CONNECTED)
+    // Maintain network connection
+    if (activeConnection == WIFI)
     {
-        Serial.println("[NET] WiFi disconnected, reconnecting...");
-        ensureWifi();
-    }
-
-    if (!mqtt.connected())
-    {
-        if (!mqttReconnect())
+        if (WiFi.status() != WL_CONNECTED)
         {
-            // Light cooldown to avoid tight loops when broker is unavailable
-            delay(2000);
+            Serial.println("[NET] WiFi disconnected, reconnecting...");
+            if (!ensureWifi())
+            {
+                // WiFi failed, try GSM fallback
+                Serial.println("[NET] WiFi failed, switching to GSM...");
+                activeConnection = NONE;
+                if (mqtt)
+                {
+                    delete mqtt;
+                    mqtt = nullptr;
+                }
+            }
         }
     }
-    mqtt.loop();
+    else if (activeConnection == GSM)
+    {
+        if (!modem.isNetworkConnected() || !modem.isGprsConnected())
+        {
+            Serial.println("[NET] GSM/GPRS disconnected, reconnecting...");
+            if (!ensureGprs())
+            {
+                activeConnection = NONE;
+                if (mqtt)
+                {
+                    delete mqtt;
+                    mqtt = nullptr;
+                }
+            }
+        }
+    }
+    else
+    {
+        // No active connection, try WiFi first, then GSM
+        if (ensureWifi())
+        {
+            activeConnection = WIFI;
+            if (!mqtt)
+            {
+                mqtt = new PubSubClient(wifiClient);
+                mqtt->setServer(MQTT_HOST, MQTT_PORT);
+                mqtt->setCallback(mqttCallback);
+            }
+        }
+        else
+        {
+            if (ensureGprs())
+            {
+                activeConnection = GSM;
+                if (!mqtt)
+                {
+                    mqtt = new PubSubClient(gsmClient);
+                    mqtt->setServer(MQTT_HOST, MQTT_PORT);
+                    mqtt->setCallback(mqttCallback);
+                }
+            }
+        }
+    }
+
+    if (mqtt)
+    {
+        if (!mqtt->connected())
+        {
+            if (!mqttReconnect())
+            {
+                // Light cooldown to avoid tight loops when broker is unavailable
+                delay(2000);
+            }
+        }
+        mqtt->loop();
+    }
 
     // Feed hardware watchdog each loop iteration
     esp_task_wdt_reset();
