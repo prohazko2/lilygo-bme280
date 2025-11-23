@@ -233,8 +233,11 @@ void setup()
 
     // Hardware watchdog (hang protection): 60s timeout for loop task
     // Will reset ESP32 if loop stops feeding for >60s (e.g., deadlock)
-    const int wdtTimeoutSec = 60;
-    esp_task_wdt_init(wdtTimeoutSec, true);
+    esp_task_wdt_config_t wdt_config;
+    wdt_config.timeout_ms = 60000;
+    wdt_config.idle_core_mask = 0;
+    wdt_config.trigger_panic = true;
+    esp_task_wdt_init(&wdt_config);
     esp_task_wdt_add(NULL); // add current (loop) task
 }
 
