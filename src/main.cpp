@@ -109,6 +109,19 @@ static bool publishBme()
     return sent;
 }
 
+static void mqttCallback(char *topic, byte *payload, unsigned int length)
+{
+    Serial.print("[MQTT] Message received on topic: ");
+    Serial.println(topic);
+
+    // Check if it's the read command topic
+    if (strcmp(topic, "home/bme280/read") == 0)
+    {
+        Serial.println("[MQTT] Read command received, publishing current readings");
+        publishBme();
+    }
+}
+
 static bool ensureWifi()
 {
     if (WiFi.status() == WL_CONNECTED)
@@ -179,6 +192,7 @@ static bool mqttReconnect()
     if (ok)
     {
         Serial.println("OK");
+        mqtt.subscribe("home/bme280/read");
         // Immediate publish on first successful connect
         publishBme();
         lastPublishMs = millis();
@@ -229,6 +243,7 @@ void setup()
 
     // Setup MQTT
     mqtt.setServer(MQTT_HOST, MQTT_PORT);
+    mqtt.setCallback(mqttCallback);
     lastSuccessfulMs = millis();
 
     // Hardware watchdog (hang protection): 60s timeout for loop task
