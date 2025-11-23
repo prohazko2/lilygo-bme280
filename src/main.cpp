@@ -4,61 +4,61 @@
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BME280.h>
 
-// Cellular + MQTT
-#include <TinyGsmClient.h>
+// WiFi + MQTT
+#include <WiFi.h>
 #include <PubSubClient.h>
 #include <esp_task_wdt.h>
-
-// ====== TTGO T-Call (SIM800L) Pins ======
-// Reference values commonly used by TTGO T-Call boards
-#define MODEM_TX 27
-#define MODEM_RX 26
-#define MODEM_PWRKEY 4
-#define MODEM_RST 5
-#define MODEM_POWER_ON 23
 
 // I2C pins for BME280 (ESP32 default)
 #define I2C_SDA 21
 #define I2C_SCL 22
 
-// ====== Network / MQTT configuration (fill with your values) ======
-// SIM card APN credentials
-static const char *GPRS_APN = "internet";        // e.g. "internet"
-static const char *GPRS_USER = "";               // often empty
-static const char *GPRS_PASS = "";               // often empty
+// ====== Network / MQTT configuration ======
+// WiFi credentials (from build-time env vars or defaults)
+static const char *getWifiSsid()
+{
+#ifdef WIFI_SSID
+    if (strlen(WIFI_SSID) > 0)
+    {
+        return WIFI_SSID;
+    }
+#endif
+    return ""; // must be set via env var
+}
+
+static const char *getWifiPassword()
+{
+#ifdef WIFI_PASSWORD
+    return WIFI_PASSWORD;
+#endif
+    return ""; // empty password if not set
+}
 
 // MQTT broker
-static const char *MQTT_HOST = "sandbox.rightech.io";   // change to your broker host/IP
-static const uint16_t MQTT_PORT = 1883;           // change if needed (e.g. 8883 TLS not covered here)
-static const char *MQTT_USER = "";               // optional
-static const char *MQTT_PASS = "";               // optional
-static const char *MQTT_TOPIC = "dht11/raw";
+static const char *MQTT_HOST = "sandbox.rightech.io"; // change to your broker host/IP
+static const uint16_t MQTT_PORT = 1883;               // change if needed (e.g. 8883 TLS not covered here)
+static const char *MQTT_USER = "";                    // optional
+static const char *MQTT_PASS = "";                    // optional
+static const char *MQTT_TOPIC = "home/bme280";
 
 // ====== Globals ======
 Adafruit_BME280 bme;
 
-// Serial for modem
-HardwareSerial SerialAT(1);
-
-#define TINY_GSM_MODEM_SIM800
-TinyGsm modem(SerialAT);
-TinyGsmClient gsmClient(modem);
-PubSubClient mqtt(gsmClient);
+WiFiClient wifiClient;
+PubSubClient mqtt(wifiClient);
 
 unsigned long lastPublishMs = 0;
 const unsigned long publishIntervalMs = 300000; // 5 minutes
-unsigned long lastSuccessfulMs = 0; // watchdog anchor
+unsigned long lastSuccessfulMs = 0;             // watchdog anchor
 
-
-static void logNetworkInfo(const char *prefix)
+static void logNetworkInfo()
 {
-    int16_t rssi = modem.getSignalQuality();
-    String oper = modem.getOperator();
-    //String ip = modem.localIP();
-    Serial.print(prefix);
-    Serial.print(" RSSI="); Serial.print(rssi);
-    Serial.print(" dBm, OP="); Serial.print(oper);
-    //Serial.print(", IP="); Serial.println(ip);
+    Serial.print("[WiFi] SSID=");
+    Serial.print(WiFi.SSID());
+    Serial.print(", RSSI=");
+    Serial.print(WiFi.RSSI());
+    Serial.print(" dBm, IP=");
+    Serial.println(WiFi.localIP());
 }
 
 static const char *getMqttClientId()
@@ -74,14 +74,14 @@ static const char *getMqttClientId()
 
 static bool publishBme()
 {
-    float temperatureC = bme.readTemperature();
-    //float humidity = bme.readHumidity();
-    //float pressurePa = bme.readPressure();
+    float t = bme.readTemperature();
+    float h = bme.readHumidity();
+    float p = bme.readPressure() / 100.0f;
 
     char payload[160];
     snprintf(payload, sizeof(payload),
-             "{\"c\":%.2f}",
-             temperatureC);
+             "{\"t\": %.2f, \"h\": %.2f, \"p\": %.2f}",
+             t, h, p);
 
     Serial.print("[MQTT] Publish ");
     Serial.print(MQTT_TOPIC);
@@ -109,62 +109,49 @@ static bool publishBme()
     return sent;
 }
 
-static void powerOnModem()
+static bool ensureWifi()
 {
-    pinMode(MODEM_POWER_ON, OUTPUT);
-    pinMode(MODEM_PWRKEY, OUTPUT);
-    pinMode(MODEM_RST, OUTPUT);
-
-    // Turn on the modem power supply
-    digitalWrite(MODEM_POWER_ON, HIGH);
-    delay(100);
-
-    // Ensure reset is high (inactive)
-    digitalWrite(MODEM_RST, HIGH);
-    delay(100);
-
-    // Pulse PWRKEY to power the modem
-    digitalWrite(MODEM_PWRKEY, HIGH);
-    delay(100);
-    digitalWrite(MODEM_PWRKEY, LOW);
-    delay(1000);
-    digitalWrite(MODEM_PWRKEY, HIGH);
-
-    // Give the modem time to boot
-    delay(3000);
-}
-
-static bool ensureGprs()
-{
-    Serial.println("[GSM] Waiting for network (60s)...");
-    if (!modem.waitForNetwork(60000L))
+    if (WiFi.status() == WL_CONNECTED)
     {
-        Serial.println("[GSM] Network failed");
+        return true;
+    }
+
+    const char *ssid = getWifiSsid();
+    const char *password = getWifiPassword();
+
+    if (strlen(ssid) == 0)
+    {
+        Serial.println("[WiFi] ERROR: WIFI_SSID not set! Set it via env var: WIFI_SSID=your-ssid pio run");
         return false;
     }
-    if (!modem.isNetworkConnected())
-    {
-        Serial.println("[GSM] Not connected to network");
-        return false;
-    }
-    logNetworkInfo("[GSM]");
 
-    Serial.print("[GPRS] Attaching with APN='");
-    Serial.print(GPRS_APN);
-    Serial.println("' ...");
-    if (!modem.gprsConnect(GPRS_APN, GPRS_USER, GPRS_PASS))
+    Serial.print("[WiFi] Connecting to ");
+    Serial.print(ssid);
+    Serial.print(" ... ");
+
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(ssid, password);
+
+    int attempts = 0;
+    while (WiFi.status() != WL_CONNECTED && attempts < 30)
     {
-        Serial.println("[GPRS] GPRS attach failed");
+        delay(1000);
+        Serial.print(".");
+        attempts++;
+    }
+    Serial.println();
+
+    if (WiFi.status() == WL_CONNECTED)
+    {
+        Serial.println("[WiFi] Connected");
+        logNetworkInfo();
+        return true;
+    }
+    else
+    {
+        Serial.println("[WiFi] Connection failed");
         return false;
     }
-    if (!modem.isGprsConnected())
-    {
-        Serial.println("[GPRS] Not connected after attach");
-        return false;
-    }
-    Serial.println("[GPRS] Connected");
-    logNetworkInfo("[GPRS]");
-    return true;
 }
 
 static bool mqttReconnect()
@@ -229,26 +216,14 @@ void setup()
         }
     }
 
-    // Power on and initialize modem
-    powerOnModem();
-
-    Serial.println("[MODEM] Initializing SerialAT...");
-    SerialAT.begin(115200, SERIAL_8N1, MODEM_RX, MODEM_TX);
-
-    Serial.println("[MODEM] Restarting modem...");
-    modem.restart();
-    String modemInfo = modem.getModemInfo();
-    Serial.print("[MODEM] ");
-    Serial.println(modemInfo);
-
-    // Set network mode if needed (optional)
-    // modem.setNetworkMode(2); // 2G only for SIM800
-
-    // Connect GPRS
+    // Connect to WiFi
     for (int i = 0; i < 3; ++i)
     {
-        Serial.print("[GPRS] Try "); Serial.print(i + 1); Serial.println("/3");
-        if (ensureGprs()) break;
+        Serial.print("[WiFi] Try ");
+        Serial.print(i + 1);
+        Serial.println("/3");
+        if (ensureWifi())
+            break;
         delay(5000);
     }
 
@@ -265,14 +240,15 @@ void setup()
 
 void loop()
 {
-    // Maintain MQTT connection
+    // Maintain WiFi and MQTT connection
+    if (WiFi.status() != WL_CONNECTED)
+    {
+        Serial.println("[NET] WiFi disconnected, reconnecting...");
+        ensureWifi();
+    }
+
     if (!mqtt.connected())
     {
-        if (!modem.isNetworkConnected() || !modem.isGprsConnected())
-        {
-            Serial.println("[NET] Lost network/GPRS, re-attaching...");
-            ensureGprs();
-        }
         if (!mqttReconnect())
         {
             // Light cooldown to avoid tight loops when broker is unavailable
